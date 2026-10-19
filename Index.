@@ -1,0 +1,104 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JUNIOR FX | Trading Engine</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#080808;color:#fff;font-family:Arial,sans-serif;padding:20px}
+header{text-align:center;border-bottom:1px solid #d4af37;padding:15px}
+h1{color:#d4af37;letter-spacing:3px}
+p{color:#bbb}
+.card{max-width:480px;margin:20px auto;background:#151515;border:1px solid #66551e;border-radius:14px;padding:20px}
+label{display:block;margin-top:14px;color:#d4af37;font-size:14px}
+input,select{width:100%;padding:13px;margin-top:7px;background:#252525;color:white;border:1px solid #444;border-radius:7px;font-size:16px}
+button{width:100%;padding:14px;margin-top:15px;border:0;border-radius:8px;font-weight:bold;font-size:15px}
+.start{background:#d4af37;color:#080808}
+.stop{background:#333;color:white;border:1px solid #666}
+.status{padding:12px;background:#242424;border-radius:8px;text-align:center;color:#ffd966}
+.small{font-size:12px;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+<h1>JUNIOR FX</h1>
+<p>YOUR TRADING CONTROL PANEL</p>
+</header>
+
+<div class="card">
+<h2>Broker Settings</h2>
+
+<label for="broker">Broker</label>
+<select id="broker">
+<option>HFM</option>
+<option>Exness</option>
+<option>Other MT5 broker</option>
+</select>
+
+<label for="platform">Platform</label>
+<select id="platform">
+<option>MetaTrader 5 (MT5)</option>
+</select>
+
+<label for="account">MT5 Account Number</label>
+<input id="account" type="text" inputmode="numeric"
+placeholder="Enter account number">
+
+<label for="server">Broker Server Name</label>
+<input id="server" type="text"
+placeholder="e.g. your HFM MT5 server">
+
+<label for="market">Trading Market</label>
+<select id="market">
+<option>XAUUSD — Gold</option>
+<option>NAS100 — Nasdaq (if broker supports it)</option>
+<option>BTCUSD — Bitcoin (if broker supports it)</option>
+</select>
+
+<p class="small">For your safety, do not enter your MT5 password on this webpage. These settings are not sent to a broker.</p>
+</div>
+
+<div class="card">
+<h2>Engine Control</h2>
+<div id="status" class="status">ENGINE STOPPED — NOT CONNECTED</div>
+
+<button class="start" onclick="startEngine()">START ENGINE</button>
+<button class="stop" onclick="stopEngine()">STOP ENGINE</button>
+
+<p id="message" class="small">
+The website interface is ready. An MT5 trading program must be connected separately before live trading can begin.
+</p>
+</div>
+
+<script>
+function startEngine(){
+ const account=document.getElementById('account').value.trim();
+ const server=document.getElementById('server').value.trim();
+ const broker=document.getElementById('broker').value;
+ const market=document.getElementById('market').value;
+
+ if(!account||!server){
+  document.getElementById('message').textContent=
+  'Please enter your MT5 account number and broker server name.';
+  return;
+ }
+
+ document.getElementById('status').textContent=
+ 'SETTINGS ENTERED — ENGINE NOT CONNECTED';
+
+ document.getElementById('message').textContent=
+ 'Selected broker: '+broker+'. Market: '+market+
+ '. Your settings are only in this page. Connect a real MT5 Expert Advisor or secure backend to enable trading.';
+}
+
+function stopEngine(){
+ document.getElementById('status').textContent=
+ 'ENGINE STOPPED — NOT CONNECTED';
+ document.getElementById('message').textContent=
+ 'The website control is stopped. This button cannot stop trades running separately in MT5.';
+}
+</script>
+</body>
+</html>
