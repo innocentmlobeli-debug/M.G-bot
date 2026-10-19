@@ -1,0 +1,450 @@
+
+#property strict
+#property version "1.00"
+#property description "JUNIOR FX PRO - Multi-symbol automatic EA"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+// ===== USER SETTINGS =====
+input string InpSymbols = "XAUUSD,NAS100,BTCUSD";
+input ENUM_TIMEFRAMES TradeTF = PERIOD_M1;
+
+input double FixedLot = 0.01;
+input double ProfitTargetMoney = 0.50; // Account currency
+input double MaxDailyLossMoney = 5.00; // Account currency
+
+input int FastEMA = 9;
+input int SlowEMA = 21;
+input int RSIPeriod = 14;
+input int ATRPeriod = 14;
+
+input double SL_ATR_Multiplier = 1.5;
+input double TP_ATR_Multiplier = 1.0;
+
+input int MaxOpenPositions = 3;
+input int MaxSpreadPoints = 0; // 0 = disabled
+input int DeviationPoints = 20;
+input ulong MagicNumber = 26101601;
+
+// ===== INTERNAL DATA =====
+string Symbols[];
+int FastHandle[];
+int SlowHandle[];
+int RSIHandle[];
+int ATRHandle[];
+datetime LastBar[];
+
+double DayStartBalance = 0;
+int SavedDay = -1;
+bool DailyStop = false;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   if(FixedLot <= 0 ||
+      ProfitTargetMoney <= 0 ||
+      MaxDailyLossMoney <= 0 ||
+      FastEMA <= 0 ||
+      SlowEMA <= FastEMA ||
+      MaxOpenPositions < 1)
+   {
+      Print("Invalid settings. Check EA inputs.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   ushort separator = ',';
+   int count = StringSplit(InpSymbols, separator, Symbols);
+
+   if(count <= 0)
+      return INIT_PARAMETERS_INCORRECT;
+
+   ArrayResize(FastHandle, count);
+   ArrayResize(SlowHandle, count);
+   ArrayResize(RSIHandle, count);
+   ArrayResize(ATRHandle, count);
+   ArrayResize(LastBar, count);
+
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(DeviationPoints);
+   trade.SetTypeFillingBySymbol(_Symbol);
+   trade.SetAsyncMode(false);
+
+   for(int i = 0; i < count; i++)
+   {
+      StringTrimLeft(Symbols[i]);
+      StringTrimRight(Symbols[i]);
+
+      FastHandle[i] = INVALID_HANDLE;
+      SlowHandle[i] = INVALID_HANDLE;
+      RSIHandle[i]  = INVALID_HANDLE;
+      ATRHandle[i]  = INVALID_HANDLE;
+      LastBar[i] = 0;
+
+      if(StringLen(Symbols[i]) == 0)
+         continue;
+
+      if(!SymbolSelect(Symbols[i], true))
+      {
+         Print("Symbol unavailable: ", Symbols[i],
+               ". Check the broker's exact symbol name.");
+         continue;
+      }
+
+      FastHandle[i] = iMA(
+         Symbols[i], TradeTF, FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+
+      SlowHandle[i] = iMA(
+         Symbols[i], TradeTF, SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+
+      RSIHandle[i] = iRSI(
+         Symbols[i], TradeTF, RSIPeriod, PRICE_CLOSE);
+
+      ATRHandle[i] = iATR(
+         Symbols[i], TradeTF, ATRPeriod);
+
+      if(FastHandle[i] == INVALID_HANDLE ||
+         SlowHandle[i] == INVALID_HANDLE ||
+         RSIHandle[i] == INVALID_HANDLE ||
+         ATRHandle[i] == INVALID_HANDLE)
+      {
+         Print("Indicator initialization failed: ", Symbols[i]);
+      }
+   }
+
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+
+   SavedDay = now.day_of_year;
+
+   string key = StringFormat(
+      "JFX_%I64d_%I64d_%d",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      (long)MagicNumber,
+      now.year * 1000 + now.day_of_year);
+
+   if(GlobalVariableCheck(key))
+      DayStartBalance = GlobalVariableGet(key);
+   else
+   {
+      DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      GlobalVariableSet(key, DayStartBalance);
+   }
+
+   Print("JUNIOR FX PRO initialized. Test on demo first.");
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   for(int i = 0; i < ArraySize(Symbols); i++)
+   {
+      if(FastHandle[i] != INVALID_HANDLE)
+         IndicatorRelease(FastHandle[i]);
+
+      if(SlowHandle[i] != INVALID_HANDLE)
+         IndicatorRelease(SlowHandle[i]);
+
+      if(RSIHandle[i] != INVALID_HANDLE)
+         IndicatorRelease(RSIHandle[i]);
+
+      if(ATRHandle[i] != INVALID_HANDLE)
+         IndicatorRelease(ATRHandle[i]);
+   }
+}
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   ResetDailyCheck();
+   CloseProfitableTrades();
+
+   if(DailyStop)
+      return;
+
+   if(AccountInfoDouble(ACCOUNT_EQUITY) <=
+      DayStartBalance - MaxDailyLossMoney)
+   {
+      DailyStop = true;
+      Print("Daily loss limit reached. New trades stopped.");
+      return;
+   }
+
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ||
+      !MQLInfoInteger(MQL_TRADE_ALLOWED) ||
+      !AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+      return;
+
+   if(CountMyPositions() >= MaxOpenPositions)
+      return;
+
+   for(int i = 0; i < ArraySize(Symbols); i++)
+   {
+      if(StringLen(Symbols[i]) == 0)
+         continue;
+
+      if(FastHandle[i] == INVALID_HANDLE ||
+         SlowHandle[i] == INVALID_HANDLE ||
+         RSIHandle[i] == INVALID_HANDLE ||
+         ATRHandle[i] == INVALID_HANDLE)
+         continue;
+
+      if(CountMyPositions() >= MaxOpenPositions)
+         break;
+
+      if(HasMyPosition(Symbols[i]))
+         continue;
+
+      if(!IsNewBar(i))
+         continue;
+
+      if(MaxSpreadPoints > 0)
+      {
+         MqlTick tick;
+         double point = SymbolInfoDouble(
+            Symbols[i], SYMBOL_POINT);
+
+         if(point <= 0 || !SymbolInfoTick(Symbols[i], tick))
+            continue;
+
+         double spread = (tick.ask - tick.bid) / point;
+
+         if(spread > MaxSpreadPoints)
+            continue;
+      }
+
+      double fast[2], slow[2], rsi[1], atr[1];
+
+      // Bar 2 and bar 1: closed candles only.
+      if(CopyBuffer(FastHandle[i], 0, 1, 2, fast) != 2)
+         continue;
+
+      if(CopyBuffer(SlowHandle[i], 0, 1, 2, slow) != 2)
+         continue;
+
+      if(CopyBuffer(RSIHandle[i], 0, 1, 1, rsi) != 1)
+         continue;
+
+      if(CopyBuffer(ATRHandle[i], 0, 1, 1, atr) != 1)
+         continue;
+
+      if(atr[0] <= 0)
+         continue;
+
+      // CopyBuffer stores the oldest copied value first.
+      bool buySignal =
+         fast[0] <= slow[0] &&
+         fast[1] > slow[1] &&
+         rsi[0] > 50.0;
+
+      bool sellSignal =
+         fast[0] >= slow[0] &&
+         fast[1] < slow[1] &&
+         rsi[0] < 50.0;
+
+      if(buySignal)
+         OpenTrade(Symbols[i], ORDER_TYPE_BUY, atr[0]);
+
+      else if(sellSignal)
+         OpenTrade(Symbols[i], ORDER_TYPE_SELL, atr[0]);
+   }
+}
+
+//+------------------------------------------------------------------+
+bool IsNewBar(const int index)
+{
+   datetime barTime = iTime(Symbols[index], TradeTF, 0);
+
+   if(barTime == 0)
+      return false;
+
+   if(LastBar[index] == 0)
+   {
+      LastBar[index] = barTime;
+      return false;
+   }
+
+   if(barTime != LastBar[index])
+   {
+      LastBar[index] = barTime;
+      return true;
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool HasMyPosition(const string symbol)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == symbol &&
+         (ulong)PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+         return true;
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+int CountMyPositions()
+{
+   int total = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+         total++;
+   }
+
+   return total;
+}
+
+//+------------------------------------------------------------------+
+bool OpenTrade(
+   const string symbol,
+   const ENUM_ORDER_TYPE direction,
+   const double atrValue)
+{
+   double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+   // Never silently increase the requested lot size.
+   if(step <= 0 || FixedLot < minLot ||
+      FixedLot > maxLot)
+   {
+      Print("Lot size unavailable for ", symbol,
+            ". Requested: ", DoubleToString(FixedLot, 3),
+            " Minimum: ", DoubleToString(minLot, 3));
+      return false;
+   }
+
+   double steps = FixedLot / step;
+
+   if(MathAbs(steps - MathRound(steps)) > 0.000001)
+   {
+      Print("Requested lot does not match volume step: ", symbol);
+      return false;
+   }
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(symbol, tick))
+      return false;
+
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+
+   if(point <= 0)
+      return false;
+
+   double minStop =
+      SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+
+   double slDistance = MathMax(
+      atrValue * SL_ATR_Multiplier, minStop + 2 * point);
+
+   double tpDistance = MathMax(
+      atrValue * TP_ATR_Multiplier, minStop + 2 * point);
+
+   double sl, tp;
+   bool result = false;
+
+   if(direction == ORDER_TYPE_BUY)
+   {
+      sl = NormalizeDouble(tick.ask - slDistance, digits);
+      tp = NormalizeDouble(tick.ask + tpDistance, digits);
+
+      result = trade.Buy(
+         FixedLot, symbol, 0, sl, tp, "JUNIOR FX PRO");
+   }
+   else
+   {
+      sl = NormalizeDouble(tick.bid + slDistance, digits);
+      tp = NormalizeDouble(tick.bid - tpDistance, digits);
+
+      result = trade.Sell(
+         FixedLot, symbol, 0, sl, tp, "JUNIOR FX PRO");
+   }
+
+   if(!result)
+   {
+      Print("Order failed: ", symbol,
+            " Retcode: ", trade.ResultRetcode(),
+            " ", trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   Print("Order accepted: ", symbol,
+         " volume=", DoubleToString(FixedLot, 3));
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+void CloseProfitableTrades()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      profit += PositionGetDouble(POSITION_SWAP);
+
+      if(profit >= ProfitTargetMoney)
+      {
+         if(!trade.PositionClose(ticket))
+         {
+            Print("Close failed: ", ticket,
+                  " ", trade.ResultRetcodeDescription());
+         }
+         else
+         {
+            Print("Profit target reached. Close requested: ", ticket);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void ResetDailyCheck()
+{
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+
+   if(now.day_of_year == SavedDay)
+      return;
+
+   SavedDay = now.day_of_year;
+   DailyStop = false;
+
+   string key = StringFormat(
+      "JFX_%I64d_%I64d_%d",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      (long)MagicNumber,
+      now.year * 1000 + now.day_of_year);
+
+   DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   GlobalVariableSet(key, DayStartBalance);
+
+   Print("New trading day. Daily loss limit reset.");
+}
